@@ -9,6 +9,7 @@ from playwright.async_api import Locator, Page
 
 from app.douyin import DouyinChat, PageOperationError, first_visible
 from app.models import Message, Sticker
+from app.record_source import read_daily_record
 from app.selectors import IMAGE_INPUTS, MESSAGE_INPUTS, STICKER_BUTTONS, STICKER_PANELS
 
 
@@ -115,9 +116,22 @@ SEND_STABLE_INTERVAL_MS = 500
 SEND_INITIAL_CLEAN_GRACE_MS = 2_000
 
 
-async def send_message(page: Page, chat: DouyinChat, message: Message, stickers: dict[str, Sticker]) -> None:
+async def send_message(
+    page: Page,
+    chat: DouyinChat,
+    message: Message,
+    stickers: dict[str, Sticker],
+    run_date: str | None = None,
+) -> None:
+    if message.type == "daily_record":
+        if message.records_dir is None:
+            raise PageOperationError("当天情话消息缺少 records_dir")
+        if run_date is None:
+            raise PageOperationError("当天情话消息缺少任务日期")
+        await send_text(chat, read_daily_record(message.records_dir, run_date))
+        return
     if message.type == "random":
-        await send_message(page, chat, random.choice(message.choices), stickers)
+        await send_message(page, chat, random.choice(message.choices), stickers, run_date)
         return
     if message.type == "text":
         await send_text(chat, message.content or "")
@@ -145,7 +159,13 @@ async def send_text(chat: DouyinChat, content: str) -> None:
         await page.wait_for_function(
             """([txt]) => {
                 const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
-                return es.some(e => (e.innerText || '').includes(txt));
+                // The editor inserts zero-width line markers in multiline text.
+                // Compare rendered text without those markers or layout whitespace.
+                const normalize = value => (value || '')
+                    .replace(/[\\u200B\\uFEFF]/g, '')
+                    .replace(/\\s+/g, ' ').trim();
+                const expected = normalize(txt);
+                return expected.length > 0 && es.some(e => normalize(e.innerText).includes(expected));
             }""",
             arg=[content],
             timeout=5_000,
